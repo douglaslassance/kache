@@ -551,6 +551,51 @@ fn active_plan_cancel_latch_fires_once() {
 }
 
 #[test]
+fn a_session_without_candidates_never_cancels_prefetch() {
+    let mut plan = ActivePlan::new("sess-3".into(), String::new(), "none", HashSet::new(), 0, 0);
+    for i in 0..20 {
+        assert!(!plan.record_demand(&format!("k{i}")));
+    }
+    assert!(!plan.cancelled);
+}
+
+#[test]
+fn a_plan_installed_mid_build_scores_the_demands_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = Daemon::new(test_config(dir.path()));
+    let req = BuildStartedRequest {
+        intent: kache_core::BuildIntent::default(),
+        client_epoch: 0,
+        client_version: None,
+        session_id: "session".into(),
+    };
+    daemon.ensure_active_session(&req);
+    // Cargo keeps compiling while the plan is resolved remotely.
+    for i in 0..10 {
+        daemon
+            .active_plan
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .record_demand(&format!("k{i}"));
+    }
+    daemon.install_plan(
+        "session",
+        "plan",
+        "fallback",
+        (0..20).map(|i| format!("k{i}")),
+        None,
+    );
+
+    let mut plan = daemon.active_plan.lock().unwrap();
+    let plan = plan.as_mut().unwrap();
+    assert_eq!(plan.demanded_candidates.len(), 10);
+    assert!(!plan.record_demand("k10"));
+    assert!(!plan.cancelled);
+}
+
+#[test]
 fn planned_candidates_upgrade_the_tracked_session_in_place() {
     let dir = tempfile::tempdir().unwrap();
     let config = test_config(dir.path());

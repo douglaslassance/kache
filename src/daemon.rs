@@ -2456,7 +2456,8 @@ impl ActivePlan {
                 self.used.insert(key.to_string());
             }
         }
-        if self.cancelled {
+        // A session whose plan is still being resolved has nothing to judge yet.
+        if self.cancelled || self.candidates.is_empty() {
             return false;
         }
         let downloaded_not_demanded = self
@@ -6265,6 +6266,12 @@ impl Daemon {
             {
                 existing.plan_id = plan.plan_id;
                 existing.plan_source = plan.plan_source;
+                // Demands made while the plan resolved were scored against no candidates.
+                existing.demanded_candidates = existing
+                    .demanded
+                    .intersection(&plan.candidates)
+                    .cloned()
+                    .collect();
                 existing.candidates = plan.candidates;
                 existing.cancelled = false;
                 existing.last_activity_ms = plan.last_activity_ms;

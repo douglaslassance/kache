@@ -36,6 +36,8 @@ enum DiscoveryFailure {
     TooLarge,
     /// The output was not the expected JSON, or named no packages.
     Parse,
+    /// A registry or git package whose target directory names no workspace.
+    ForeignPackage,
 }
 
 pub fn discover(args: Option<&RustcArgs>) -> Option<BuildIntent> {
@@ -159,6 +161,10 @@ fn discover_workspace(
         }
     }
 
+    // A bare `cargo metadata` would run in the package's own source directory.
+    if args.is_some_and(RustcArgs::cargo_capped_lints) {
+        return Err(DiscoveryFailure::ForeignPackage);
+    }
     run_cargo_metadata(cargo, None, deadline)
 }
 
@@ -199,6 +205,15 @@ fn candidate_roots(
         && let Some(root) = args.verified_workspace_root(cwd)
     {
         push_unique(&mut roots, root);
+    }
+    // Cargo compiles a registry or git package in its own source directory,
+    // which may ship a `Cargo.lock` of its own, so only the target directory
+    // names the workspace building it.
+    if let Some(args) = args.filter(|args| args.cargo_capped_lints()) {
+        if let Some(root) = args.workspace_root() {
+            push_unique(&mut roots, root);
+        }
+        return roots;
     }
     if let Some(manifest_dir) = manifest_dir {
         push_unique(&mut roots, manifest_dir.to_path_buf());
@@ -579,6 +594,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(found, ws.path().join("Cargo.lock"));
+    }
+
+    /// A registry package that publishes a `Cargo.lock` of its own.
+    fn registry_package() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"published\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        write_lock(dir.path(), &[("published", "1.0.0"), ("wrong", "9.9.9")]);
+        dir
+    }
+
+    /// The arguments Cargo gives a registry or git package, whose lints it caps.
+    fn registry_rustc_args_for_out_dir(out_dir: &Path) -> RustcArgs {
+        RustcArgs::parse(&[
+            "rustc".to_string(),
+            "--cap-lints".to_string(),
+            "allow".to_string(),
+            "--out-dir".to_string(),
+            out_dir.to_string_lossy().into_owned(),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn a_registry_package_reads_the_lock_of_the_workspace_building_it() {
+        let ws = scaffold_workspace();
+        write_lock(ws.path(), &[("app", "0.1.0"), ("dep", "0.1.0")]);
+        let out_dir = ws.path().join("target/debug/deps");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // Cargo compiles a registry package with its own source directory as cwd.
+        let package = registry_package();
+
+        let intent = discover_with_context(
+            Some(&registry_rustc_args_for_out_dir(&out_dir)),
+            Some(package.path()),
+            Some(package.path()),
+        )
+        .expect("the workspace building the package should be discovered");
+        assert_eq!(intent.crate_names, vec!["app", "dep"]);
+        assert_eq!(
+            intent.lock_path.map(PathBuf::from),
+            Some(ws.path().join("Cargo.lock"))
+        );
+    }
+
+    #[test]
+    fn a_registry_package_never_supplies_its_own_lock() {
+        let package = registry_package();
+        let external = tempfile::tempdir().unwrap();
+        let out_dir = external.path().join("target/debug/deps");
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        assert!(
+            discover_with_context(
+                Some(&registry_rustc_args_for_out_dir(&out_dir)),
+                Some(package.path()),
+                Some(package.path()),
+            )
+            .is_none()
+        );
     }
 
     #[test]

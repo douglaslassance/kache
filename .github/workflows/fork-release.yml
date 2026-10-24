@@ -1,0 +1,33 @@
+name: Fork release
+
+# Builds the Linux binary kache-action installs, for tags like `1.2.2-fork.1`.
+# Upstream's `v*` tags run ci.yml, which needs the upstream signing secrets.
+on:
+  push:
+    tags: ["*-fork.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      KACHE_VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - run: cross build --release --locked --target x86_64-unknown-linux-musl --bin kache
+      - name: Package
+        run: |
+          archive=kache-x86_64-unknown-linux-musl.tar.gz
+          tar -czf "$archive" -C target/x86_64-unknown-linux-musl/release kache
+          sha256sum "$archive" > "$archive.sha256"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" kache-x86_64-unknown-linux-musl.tar.gz kache-x86_64-unknown-linux-musl.tar.gz.sha256 \
+            --title "$GITHUB_REF_NAME" --notes "kache $GITHUB_REF_NAME with the fixes on the branch it was tagged from." --prerelease
